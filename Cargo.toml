@@ -6,7 +6,8 @@ members = [
     "initializer",
     "profiler",
     "service",
-    "certifier",
+    "certifier", 
+    "pow-service",
 ]
 
 [package]
