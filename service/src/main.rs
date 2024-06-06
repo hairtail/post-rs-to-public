@@ -1,7 +1,9 @@
+use std::sync::Mutex;
 use std::{fs::read_to_string, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use clap::{Args, Parser, ValueEnum};
 use eyre::Context;
+use futures::future::select_all;
 use serde_with::{formats, hex::Hex, serde_as};
 use sysinfo::{Pid, ProcessStatus, System};
 use tokio::net::TcpListener;
@@ -17,7 +19,7 @@ use post_service::{client, operator};
 struct Cli {
     /// directory of POST data
     #[arg(short, long)]
-    dir: PathBuf,
+    dirs: Vec<PathBuf>,
     /// address to connect to
     #[arg(short, long)]
     address: String,
@@ -37,6 +39,10 @@ struct Cli {
     /// the operator service is disabled if not specified
     #[arg(long)]
     operator_address: Option<SocketAddr>,
+
+    /// pow computing server address to connect to
+    #[arg(long)]
+    pow_address: Option<SocketAddr>,
 
     #[command(flatten, next_help_heading = "POST configuration")]
     post_config: PostConfig,
@@ -230,26 +236,6 @@ async fn main() -> eyre::Result<()> {
         }
     };
 
-    let service = post_service::service::PostService::new(
-        args.dir,
-        post::config::ProofConfig {
-            k1: args.post_config.k1,
-            k2: args.post_config.k2,
-            pow_difficulty: args.post_config.pow_difficulty,
-        },
-        scrypt,
-        args.post_settings.nonces,
-        cores_config,
-        args.post_settings.randomx_mode.into(),
-    )
-    .wrap_err("creating Post Service")?;
-
-    let post_metadata = client::PostService::get_metadata(&service);
-    verify_num_units(
-        args.post_config.min_num_units..=args.post_config.max_num_units,
-        post_metadata.num_units,
-    )?;
-
     let tls = if let Some(tls) = args.tls {
         log::info!(
             "configuring TLS: server: (CA cert: {}, domain: {:?}), client: (cert: {}, key: {})",
@@ -271,15 +257,44 @@ async fn main() -> eyre::Result<()> {
         None
     };
 
-    let service = Arc::new(service);
+    let mut priority = 1;
+    let locker = Arc::new(Mutex::new(1));
+    let mut handlers = vec![];
+    for dir in args.dirs {
+        let service = post_service::service::PostService::new(
+            dir,
+            post::config::ProofConfig {
+                k1: args.post_config.k1,
+                k2: args.post_config.k2,
+                pow_difficulty: args.post_config.pow_difficulty,
+            },
+            scrypt,
+            args.post_settings.nonces,
+            cores_config.clone(),
+            args.post_settings.randomx_mode.into(),
+            priority,
+            args.pow_address.clone(),
+            locker.clone(),
+        )
+        .wrap_err("creating Post Service")?;
+        let post_metadata = client::PostService::get_metadata(&service);
+        verify_num_units(
+            args.post_config.min_num_units..=args.post_config.max_num_units,
+            post_metadata.num_units,
+        )?;
+        let service = Arc::new(service);
+        if let Some(address) = args.operator_address {
+            let listener = TcpListener::bind(address).await?;
+            tokio::spawn(operator::run(listener, service.clone()));
+        }
 
-    if let Some(address) = args.operator_address {
-        let listener = TcpListener::bind(address).await?;
-        tokio::spawn(operator::run(listener, service.clone()));
+        let client = client::ServiceClient::new(args.address.clone(), tls.clone(), service)?;
+        let client_handle = tokio::spawn(client.run(args.max_retries, args.reconnect_interval_s));
+        handlers.push(client_handle);
+        priority += 1;
     }
 
-    let client = client::ServiceClient::new(args.address, tls, service)?;
-    let client_handle = tokio::spawn(client.run(args.max_retries, args.reconnect_interval_s));
+    let handle = select_all(handlers);
 
     // A channel to communicate when the blocking task should quit.
     let (term_tx, term_rx) = oneshot::channel();
@@ -289,9 +304,9 @@ async fn main() -> eyre::Result<()> {
             log::info!("PID watcher exited: {err:?}");
             return Ok(())
         }
-        err = client_handle => {
+        err = handle => {
             drop(term_tx);
-            return err.unwrap();
+            return err.0.unwrap();
         }
     }
 }

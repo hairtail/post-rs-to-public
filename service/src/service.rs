@@ -1,6 +1,7 @@
 //! Post Service
 
 use std::{
+    net::SocketAddr,
     ops::{Range, RangeInclusive},
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc, Mutex},
@@ -13,6 +14,7 @@ use post::{
     prove::{self, Proof},
     verification::{Mode, Verifier},
 };
+use pow_service::{generate_proof_remotely, post_server_check};
 
 use crate::operator::ServiceState;
 
@@ -110,6 +112,9 @@ pub struct PostService {
     threads: post::config::Cores,
     pow_flags: RandomXFlag,
     proof_generation: Mutex<ProofGenProcess>,
+    priority: u16,
+    pow_address: Option<SocketAddr>,
+    locker: Arc<Mutex<u8>>,
 
     stop: Arc<AtomicBool>,
 }
@@ -122,6 +127,9 @@ impl PostService {
         nonces: usize,
         threads: post::config::Cores,
         pow_flags: RandomXFlag,
+        priority: u16,
+        pow_address: Option<SocketAddr>,
+        locker: Arc<Mutex<u8>>,
     ) -> eyre::Result<Self> {
         Ok(Self {
             metadata: post::metadata::load(&datadir).wrap_err("loading POST metadata")?,
@@ -132,6 +140,9 @@ impl PostService {
             threads,
             pow_flags,
             proof_generation: Mutex::new(ProofGenProcess::Idle),
+            priority,
+            pow_address,
+            locker,
             stop: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -167,12 +178,36 @@ impl crate::client::PostService for PostService {
                 let stop = self.stop.clone();
                 let progress = ProvingProgress::default();
                 let reporter = progress.clone();
+                let priority = self.priority;
+                let pow_address = self.pow_address.clone();
+                let locker = self.locker.clone();
                 *proof_gen = ProofGenProcess::Running {
                     challenge,
-                    handle: Some(std::thread::spawn(move || {
-                        post::prove::generate_proof(
+                    handle: Some(std::thread::spawn(move || match pow_address {
+                        Some(pow_address) => {
+                            match post_server_check(pow_address.clone().to_string()) {
+                                Ok(_) => generate_proof_remotely(
+                                    &datadir,
+                                    &challenge,
+                                    cfg,
+                                    nonces,
+                                    threads,
+                                    pow_flags,
+                                    stop,
+                                    priority,
+                                    pow_address,
+                                    locker,
+                                    reporter,
+                                ),
+                                Err(_) => post::prove::generate_proof(
+                                    &datadir, &challenge, cfg, nonces, threads, pow_flags, stop,
+                                    reporter,
+                                ),
+                            }
+                        }
+                        None => post::prove::generate_proof(
                             &datadir, &challenge, cfg, nonces, threads, pow_flags, stop, reporter,
-                        )
+                        ),
                     })),
                     progress,
                 };
