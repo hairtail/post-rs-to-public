@@ -131,6 +131,37 @@ pub struct Prover8_56 {
 impl Prover8_56 {
     pub(crate) const NONCES_PER_AES: u32 = 16;
 
+    pub fn from_pow_ciphers(
+        nonces: Range<u32>,
+        challenge: &[u8; 32],
+        pow_ciphers: HashMap<u32, u64>,
+        difficulty: u64,
+    ) -> eyre::Result<Self> {
+        let mut ciphers: Vec<AesCipher> = vec![];
+        for (k, v) in pow_ciphers {
+            ciphers.push(AesCipher::new(challenge, k, v));
+        }
+        ciphers.sort_by_key(|x| x.nonce_group);
+        let lazy_ciphers = nonces
+            .map(|nonce| {
+                let nonce_group = calc_nonce_group(nonce, Self::NONCES_PER_AES);
+                AesCipher::new_lazy(
+                    challenge,
+                    nonce,
+                    nonce_group as u32,
+                    ciphers[nonce_group % ciphers.len()].pow,
+                )
+            })
+            .collect();
+        let (difficulty_msb, difficulty_lsb) = Self::split_difficulty(difficulty);
+        Ok(Self {
+            ciphers,
+            lazy_ciphers,
+            difficulty_msb,
+            difficulty_lsb,
+        })
+    }
+
     pub fn new<P: pow::Prover>(
         challenge: &[u8; 32],
         nonces: Range<u32>,
@@ -382,7 +413,7 @@ where
     }
 }
 
-fn create_thread_pool<F>(
+pub fn create_thread_pool<F>(
     cores: config::Cores,
     on_affinity_set_error: F,
 ) -> Result<rayon::ThreadPool, rayon::ThreadPoolBuildError>

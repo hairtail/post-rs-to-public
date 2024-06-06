@@ -111,7 +111,7 @@ pub(crate) fn pos_files(datadir: &Path) -> eyre::Result<impl Iterator<Item = Dir
     Ok(files)
 }
 
-pub(crate) fn read_data(
+pub fn read_data(
     datadir: &Path,
     batch_size: usize,
     file_size: u64,
