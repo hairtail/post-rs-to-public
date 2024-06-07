@@ -1,9 +1,11 @@
+use std::fs;
 use std::sync::Mutex;
 use std::{fs::read_to_string, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use clap::{Args, Parser, ValueEnum};
 use eyre::Context;
 use futures::future::select_all;
+use log::info;
 use serde_with::{formats, hex::Hex, serde_as};
 use sysinfo::{Pid, ProcessStatus, System};
 use tokio::net::TcpListener;
@@ -194,6 +196,15 @@ fn parse_difficulty(arg: &str) -> eyre::Result<[u8; 32]> {
         .wrap_err("invalid difficulty length")
 }
 
+fn load_postdata(path: &PathBuf) -> std::io::Result<Vec<PathBuf>> {
+    let data = fs::read_dir(path)?
+        .flatten()
+        .filter(|dir| dir.path().is_dir())
+        .map(|dir| dir.path())
+        .collect();
+    Ok(data)
+}
+
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     let args = Cli::parse();
@@ -257,41 +268,48 @@ async fn main() -> eyre::Result<()> {
         None
     };
 
-    let mut priority = 1;
-    let locker = Arc::new(Mutex::new(1));
     let mut handlers = vec![];
-    for dir in args.dirs {
-        let service = post_service::service::PostService::new(
-            dir,
-            post::config::ProofConfig {
-                k1: args.post_config.k1,
-                k2: args.post_config.k2,
-                pow_difficulty: args.post_config.pow_difficulty,
-            },
-            scrypt,
-            args.post_settings.nonces,
-            cores_config.clone(),
-            args.post_settings.randomx_mode.into(),
-            priority,
-            args.pow_address.clone(),
-            locker.clone(),
-        )
-        .wrap_err("creating Post Service")?;
-        let post_metadata = client::PostService::get_metadata(&service);
-        verify_num_units(
-            args.post_config.min_num_units..=args.post_config.max_num_units,
-            post_metadata.num_units,
-        )?;
-        let service = Arc::new(service);
-        if let Some(address) = args.operator_address {
-            let listener = TcpListener::bind(address).await?;
-            tokio::spawn(operator::run(listener, service.clone()));
-        }
+    for path in args.dirs {
+        if let Ok(dirs) = load_postdata(&path) {
+            let mut priority = 1;
+            let locker = Arc::new(Mutex::new(1));
+            for dir in dirs {
+                if let Ok(service) = post_service::service::PostService::new(
+                    dir.clone(),
+                    post::config::ProofConfig {
+                        k1: args.post_config.k1,
+                        k2: args.post_config.k2,
+                        pow_difficulty: args.post_config.pow_difficulty,
+                    },
+                    scrypt,
+                    args.post_settings.nonces,
+                    cores_config.clone(),
+                    args.post_settings.randomx_mode.into(),
+                    priority,
+                    args.pow_address.clone(),
+                    locker.clone(),
+                ) {
+                    info!("Successfully load post data at {:?}", dir);
+                    let post_metadata = client::PostService::get_metadata(&service);
+                    verify_num_units(
+                        args.post_config.min_num_units..=args.post_config.max_num_units,
+                        post_metadata.num_units,
+                    )?;
+                    let service = Arc::new(service);
+                    if let Some(address) = args.operator_address {
+                        let listener = TcpListener::bind(address).await?;
+                        tokio::spawn(operator::run(listener, service.clone()));
+                    }
 
-        let client = client::ServiceClient::new(args.address.clone(), tls.clone(), service)?;
-        let client_handle = tokio::spawn(client.run(args.max_retries, args.reconnect_interval_s));
-        handlers.push(client_handle);
-        priority += 1;
+                    let client =
+                        client::ServiceClient::new(args.address.clone(), tls.clone(), service)?;
+                    let client_handle =
+                        tokio::spawn(client.run(args.max_retries, args.reconnect_interval_s));
+                    handlers.push(client_handle);
+                    priority += 1;
+                }
+            }
+        }
     }
 
     let handle = select_all(handlers);
