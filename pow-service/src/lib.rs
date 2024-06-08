@@ -14,7 +14,7 @@ use std::{
 
 pub use anyhow::anyhow;
 use eyre::Context;
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use messages::{TaskResponse, TaskSubmit, TaskSubmitResponse};
 use post::{
     config::{self, ProofConfig},
@@ -49,7 +49,6 @@ pub fn generate_pow_remotely(
     pow_flags: RandomXFlag,
 ) -> eyre::Result<HashMap<u32, u64>> {
     let base_url = &format!("http://{}", pow_address);
-    let pow_time = Instant::now();
     let pow_result = {
         let req = TaskSubmit {
             priority,
@@ -67,7 +66,7 @@ pub fn generate_pow_remotely(
             .unwrap()
             .into_json()
             .unwrap();
-        info!("k2pow task submitted, resp: {:?}", resp);
+        debug!("k2pow task submitted, resp: {:?}", resp);
         let mut task_id = resp.id.clone();
         loop {
             let query_path = format!("{}/task", base_url);
@@ -81,7 +80,7 @@ pub fn generate_pow_remotely(
                 Ok(response) => match response.status {
                     1 => debug!("task is in pending queue"),
                     2 => {
-                        info!("task completed");
+                        debug!("task completed");
                         break response.data.unwrap();
                     }
                     3 => {
@@ -101,8 +100,6 @@ pub fn generate_pow_remotely(
             debug!("try to get k2pow 5 second later");
         }
     };
-    let pow_mins = pow_time.elapsed().as_secs() / 60;
-    log::info!("Finished k2pow in {} minutes", pow_mins);
     Ok(pow_result)
 }
 
@@ -182,7 +179,7 @@ where
 
         let read_time = Instant::now();
         let data_reader = read_data(datadir, 1024 * 1024, metadata.max_file_size)?;
-        log::info!("started reading POST data");
+        log::info!("started reading POST data, {:?}", datadir);
         let result = pool.install(|| {
             data_reader
                 .par_bridge()
