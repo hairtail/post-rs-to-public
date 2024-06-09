@@ -117,7 +117,7 @@ impl ProxyServer {
                             pow_flags,
                         } = request.request;
 
-                        let id = hex::encode(&node_id);
+                        let id = format!("{}-{}-{}", hex::encode(&node_id), start_nonce, end_nonce);
                         let pow_request = PowRequest {
                             id: id.clone(),
                             challenge,
