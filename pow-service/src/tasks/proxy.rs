@@ -325,7 +325,12 @@ pub async fn submit_task_handler(
     State(shared): State<Arc<ProxyServer>>,
     extract::Json(request): extract::Json<TaskSubmit>,
 ) -> Json<TaskSubmitResponse> {
-    let id = hex::encode(&request.node_id);
+    let id = format!(
+        "{}-{}-{}",
+        hex::encode(&request.node_id),
+        request.start_nonce,
+        request.end_nonce
+    );
     if shared
         .queue
         .read()
