@@ -336,7 +336,11 @@ pub async fn submit_task_handler(
         .read()
         .await
         .iter()
-        .filter(|&(task, _)| task.node_id == request.node_id)
+        .filter(|&(task, _)| {
+            task.node_id == request.node_id
+                && task.start_nonce == request.start_nonce
+                && task.end_nonce == request.end_nonce
+        })
         .collect::<Vec<(&TaskSubmit, &Reverse<u16>)>>()
         .len()
         > 0
@@ -382,7 +386,7 @@ pub async fn task_result_handler(
         .read()
         .await
         .iter()
-        .filter(|&(task, _)| hex::encode(task.node_id) == task_id)
+        .filter(|&(task, _)| format!("{}-{}-{}", hex::encode(task.node_id), task.start_nonce, task.end_nonce) == task_id)
         .collect::<Vec<(&TaskSubmit, &Reverse<u16>)>>()
         .len()
         == 0

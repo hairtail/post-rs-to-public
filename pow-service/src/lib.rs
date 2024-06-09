@@ -96,7 +96,7 @@ pub fn generate_pow_remotely(
                 },
                 Err(e) => error!("{}", e),
             }
-            sleep(Duration::from_secs(5));
+            sleep(Duration::from_secs(30));
             debug!("try to get k2pow 5 second later");
         }
     };
