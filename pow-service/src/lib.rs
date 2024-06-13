@@ -1,9 +1,10 @@
 use std::{
     borrow::Borrow,
     collections::HashMap,
+    env,
     net::SocketAddr,
     ops::Range,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -30,6 +31,10 @@ pub mod messages;
 pub mod tasks;
 
 const BLOCK_SIZE: usize = 16;
+
+pub fn get_default_db_path() -> PathBuf {
+    env::current_dir().unwrap()
+}
 
 pub fn post_server_check(server: String) -> anyhow::Result<()> {
     let result = ureq::get(&format!("http://{}/health", &server)).call();

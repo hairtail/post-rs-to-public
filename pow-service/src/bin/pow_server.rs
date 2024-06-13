@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use pow_service::get_default_db_path;
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Parser, Debug)]
@@ -14,8 +15,8 @@ struct Cli {
     /// network to work on, miannet or testnet
     #[arg(short, long)]
     network: String,
-    /// path to db datadir
-    #[arg(short, long)]
+    /// path to sqlite datadir
+    #[arg(short, long, default_value=get_default_db_path().into_os_string())]
     datadir: PathBuf,
 }
 
