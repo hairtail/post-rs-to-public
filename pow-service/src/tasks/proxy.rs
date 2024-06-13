@@ -2,6 +2,7 @@ use std::{
     cmp::Reverse,
     collections::HashMap,
     net::SocketAddr,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -14,6 +15,7 @@ use axum::{
     routing::{get, post},
     BoxError, Json, Router,
 };
+use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use log::{debug, info, warn};
 use priority_queue::PriorityQueue;
@@ -30,12 +32,13 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tower::{timeout::TimeoutLayer, ServiceBuilder};
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::messages::{
-    codec::{PoWMessageCodec, PowMessage, PowRequest},
-    ServerMessage, ServerSubmitRequest, TaskResponse, TaskSubmit, TaskSubmitResponse,
+use crate::{
+    db::DBHandler,
+    messages::{
+        codec::{PoWMessageCodec, PowMessage, PowRequest},
+        ServerMessage, ServerSubmitRequest, TaskResponse, TaskSubmit, TaskSubmitResponse,
+    },
 };
-
-use super::cache::RedisClient;
 
 #[derive(Debug, Clone)]
 pub struct ServerWorker {
@@ -55,29 +58,20 @@ pub struct ProxyServer {
     pub workers: Arc<RwLock<HashMap<String, ServerWorker>>>,
     pub queue: Arc<RwLock<PriorityQueue<TaskSubmit, Reverse<u16>>>>,
     pub pending: Arc<RwLock<HashMap<String, Instant>>>,
-    pub db: Arc<RwLock<RedisClient>>,
+    pub db: DBHandler,
 }
 
 impl ProxyServer {
-    pub fn new(redis: &str) -> Arc<Self> {
+    pub fn new(db: DBHandler) -> Arc<Self> {
         Arc::new(Self {
             workers: Arc::new(RwLock::new(HashMap::new())),
             queue: Arc::new(RwLock::new(PriorityQueue::new())),
             pending: Arc::new(RwLock::new(HashMap::new())),
-            db: Arc::new(RwLock::new(RedisClient::connect(redis).unwrap())),
+            db,
         })
     }
 
-    pub async fn handle_stream(
-        stream: TcpStream,
-        server: Arc<Self>,
-        network: String,
-    ) -> Result<()> {
-        let expiration = match network.as_str() {
-            "mainnet" => 60 * 60,
-            "testnet" => 10 * 60,
-            _ => 60 * 60,
-        };
+    pub async fn handle_stream(stream: TcpStream, server: Arc<Self>) -> Result<()> {
         let (tx, mut rx) = mpsc::channel::<ServerMessage>(1024);
         let mut worker_name = stream.peer_addr().unwrap().clone().to_string();
         let (r, w) = split(stream);
@@ -186,7 +180,7 @@ impl ProxyServer {
                                         let task_id = response.id.clone();
                                         info!("task {} response from worker {}", task_id, worker_name);
                                         let task_res = TaskResponse::completed(task_id.clone(), response.ciphers_pows);
-                                        let _ = worker_server.db.write().await.set_str(&task_id, &serde_json::to_string(&task_res).unwrap(), expiration);
+                                        let _ = worker_server.db.insert_one(task_res).await;
                                         let _ = worker_server.pending.write().await.remove(&task_id);
                                         match worker_server.queue.write().await.pop() {
                                             Some((task, _)) => {
@@ -213,44 +207,6 @@ impl ProxyServer {
         });
         let _ = handler.await;
 
-        let (router, handler) = oneshot::channel();
-        let rescheduling_server = server.clone();
-        tokio::spawn(async move {
-            let _ = router.send(());
-            loop {
-                let timeout_tasks: Vec<String> = rescheduling_server
-                    .pending
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|(_, v)| v.elapsed().as_secs() >= 600)
-                    .map(|x| x.0.clone())
-                    .collect();
-                for task in timeout_tasks.iter() {
-                    let _ = rescheduling_server.pending.write().await.remove(task);
-                }
-                sleep(Duration::from_secs(30)).await;
-            }
-        });
-        let _ = handler.await;
-
-        let (router, handler) = oneshot::channel();
-        let status_server = server.clone();
-        tokio::spawn(async move {
-            let _ = router.send(());
-            loop {
-                {
-                    let online = status_server.workers.read().await;
-                    let online_workers: Vec<&String> = online.keys().collect();
-                    info!("online workers: {}", online_workers.len(),);
-                    debug!("online workers: {:?}", online_workers);
-                    info!("tasks in queue: {}", status_server.queue.read().await.len());
-                }
-                let _ = sleep(Duration::from_secs(30)).await;
-            }
-        });
-        let _ = handler.await;
-
         Ok(())
     }
 }
@@ -258,10 +214,11 @@ impl ProxyServer {
 pub async fn start_proxy(
     tcp: SocketAddr,
     rest: SocketAddr,
-    redis: &str,
+    datadir: PathBuf,
     network: String,
 ) -> Result<()> {
-    let server = ProxyServer::new(redis);
+    let db_handler = DBHandler::new(datadir).await;
+    let server = ProxyServer::new(db_handler);
     let listener = TcpListener::bind(&tcp).await.unwrap();
     let (router, handler) = oneshot::channel();
     let server_clone = server.clone();
@@ -271,15 +228,68 @@ pub async fn start_proxy(
             match listener.accept().await {
                 Ok((stream, ip)) => {
                     debug!("new connection from {}", ip);
-                    if let Err(e) =
-                        ProxyServer::handle_stream(stream, server_clone.clone(), network.clone())
-                            .await
-                    {
+                    if let Err(e) = ProxyServer::handle_stream(stream, server_clone.clone()).await {
                         log::error!("failed to handle stream, {e}");
                     }
                 }
                 Err(e) => log::error!("failed to accept connection, {:?}", e),
             }
+        }
+    });
+    let _ = handler.await;
+
+    let (router, handler) = oneshot::channel();
+    let rescheduling_server = server.clone();
+    tokio::spawn(async move {
+        let _ = router.send(());
+        loop {
+            let timeout_tasks: Vec<String> = rescheduling_server
+                .pending
+                .read()
+                .await
+                .iter()
+                .filter(|(_, v)| v.elapsed().as_secs() >= 600)
+                .map(|x| x.0.clone())
+                .collect();
+            for task in timeout_tasks.iter() {
+                let _ = rescheduling_server.pending.write().await.remove(task);
+            }
+            sleep(Duration::from_secs(30)).await;
+        }
+    });
+    let _ = handler.await;
+
+    let (router, handler) = oneshot::channel();
+    let status_server = server.clone();
+    tokio::spawn(async move {
+        let _ = router.send(());
+        loop {
+            {
+                let online = status_server.workers.read().await;
+                let online_workers: Vec<&String> = online.keys().collect();
+                info!("online workers: {}", online_workers.len(),);
+                debug!("online workers: {:?}", online_workers);
+                info!("tasks in queue: {}", status_server.queue.read().await.len());
+            }
+            let _ = sleep(Duration::from_secs(30)).await;
+        }
+    });
+    let _ = handler.await;
+
+    let (router, handler) = oneshot::channel();
+    let db_expire_server = server.clone();
+    tokio::spawn(async move {
+        let _ = router.send(());
+        loop {
+            {
+                let delta = match network.as_str() {
+                    "mainnet" => chrono::Duration::days(7),
+                    "testnet" => chrono::Duration::hours(12),
+                    _ => chrono::Duration::days(7),
+                };
+                let _ = db_expire_server.db.expire_records(Utc::now() - delta).await;
+            }
+            let _ = sleep(Duration::from_secs(600)).await;
         }
     });
     let _ = handler.await;
@@ -344,7 +354,7 @@ pub async fn submit_task_handler(
         .collect::<Vec<(&TaskSubmit, &Reverse<u16>)>>()
         .len()
         > 0
-        || shared.db.read().await.get_str(&id).is_ok()
+        || shared.db.get_one(id.to_string()).await.is_ok()
         || shared.pending.read().await.get(&id).is_some()
     {
         warn!("duplicated task, ignore");
@@ -380,13 +390,20 @@ pub async fn task_result_handler(
     extract::Json(request): extract::Json<TaskSubmitResponse>,
 ) -> Json<TaskResponse> {
     let task_id = request.id;
-    let completed_result = shared.db.read().await.get_str(&task_id);
+    let completed_result = shared.db.get_one(task_id.clone()).await;
     if shared
         .queue
         .read()
         .await
         .iter()
-        .filter(|&(task, _)| format!("{}-{}-{}", hex::encode(task.node_id), task.start_nonce, task.end_nonce) == task_id)
+        .filter(|&(task, _)| {
+            format!(
+                "{}-{}-{}",
+                hex::encode(task.node_id),
+                task.start_nonce,
+                task.end_nonce
+            ) == task_id
+        })
         .collect::<Vec<(&TaskSubmit, &Reverse<u16>)>>()
         .len()
         == 0
@@ -397,10 +414,7 @@ pub async fn task_result_handler(
         return Json(TaskResponse::missed(task_id));
     }
     match completed_result {
-        Ok(data) => {
-            let data: TaskResponse = serde_json::from_str(&data).unwrap();
-            Json(data)
-        }
+        Ok(data) => Json(data),
         Err(_) => Json(TaskResponse::init(task_id)),
     }
 }

@@ -25,6 +25,7 @@ use post::{
 };
 use rayon::iter::{ParallelBridge, ParallelIterator};
 
+pub mod db;
 pub mod messages;
 pub mod tasks;
 

@@ -14,7 +14,6 @@ futures = "0.3"
 post-rs = { path = "../" }
 randomx-rs = { git = "https://github.com/spacemeshos/randomx-rs", rev = "6f2bf32af7219a5f9ae929c3020242ecc7c6dd6a" }
 rayon = "1.6.1"
-r2d2_redis = "0.14.0"
 serde_with = { version = "3.8.1", features = ["hex"] }
 serde = { version = "1.0.89", default-features = false, features = [
     "derive",
@@ -36,3 +35,8 @@ gethostname = "0.4.3"
 hex = "0.4.3"
 thiserror = "1.0.40"
 priority-queue = "2.0.2"
+sqlx = { version = "0.7.4", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
+chrono = "0.4.38"
+
+[dev-dependencies]
+tokio = { version = "1.35.1", features = ["full"] }
