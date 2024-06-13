@@ -282,6 +282,7 @@ pub async fn start_proxy(
         let _ = router.send(());
         loop {
             {
+                info!("db expiration now");
                 let delta = match network.as_str() {
                     "mainnet" => chrono::Duration::days(7),
                     "testnet" => chrono::Duration::hours(12),

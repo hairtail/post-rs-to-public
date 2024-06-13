@@ -14,7 +14,7 @@ struct Cli {
     /// network to work on, miannet or testnet
     #[arg(short, long)]
     network: String,
-    /// network to work on, miannet or testnet
+    /// path to db datadir
     #[arg(short, long)]
     datadir: PathBuf,
 }
