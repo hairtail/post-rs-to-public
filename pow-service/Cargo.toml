@@ -24,7 +24,7 @@ serde_json = { version = "1.0.64", default-features = false, features = [
 ] }
 tower = { version = "0.4.13", features = ["timeout"] }
 tower-http = { version = "0.5.0", features = ["cors"] }
-tokio-util = { version = "0.7.3", features = ["codec"] }
+tokio-util = { version = "0.7.11", features = ["codec"] }
 log = "0.4.17"
 tokio = { version = "1.35.0", features = ["full"] }
 num_cpus = "1.16.0"
